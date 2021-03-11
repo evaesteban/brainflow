@@ -1,6 +1,6 @@
+#include <chrono>
 #include <iostream>
 #include <stdlib.h>
-#include <string>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -12,46 +12,54 @@
 #include "data_filter.h"
 
 using namespace std;
-
+using namespace std::chrono;
 
 int main (int argc, char *argv[])
 {
+    struct BrainFlowInputParams params;
+    // use synthetic board for demo
+    int board_id = (int)BoardIds::SYNTHETIC_BOARD;
+
     BoardShim::enable_dev_board_logger ();
 
-    struct BrainFlowInputParams params;
-    int res = 0;
-    int board_id = (int)BoardIds::SYNTHETIC_BOARD;
-    // use synthetic board for demo
     BoardShim *board = new BoardShim (board_id, params);
+    double **data = NULL;
+    int *eeg_channels = NULL;
+    int num_rows = 0;
+    int res = 0;
+    int sampling_rate = BoardShim::get_sampling_rate (board_id);
 
     try
     {
         board->prepare_session ();
         board->start_stream ();
-
+        BoardShim::log_message ((int)LogLevels::LEVEL_INFO, "Start sleeping in the main thread");
 #ifdef _WIN32
-        Sleep (5000);
+        Sleep (20000);
 #else
-        sleep (5);
+        sleep (20);
 #endif
 
         board->stop_stream ();
-        BrainFlowArray<double, 2> data = board->get_board_data ();
+        int data_count = 0;
+        data = board->get_board_data (&data_count);
         board->release_session ();
-        std::cout << "Original data:" << std::endl << data << std::endl;
+        num_rows = BoardShim::get_num_rows (board_id);
 
-        // calc band powers
-        int sampling_rate = BoardShim::get_sampling_rate ((int)BoardIds::SYNTHETIC_BOARD);
-        std::vector<int> eeg_channels = BoardShim::get_eeg_channels (board_id);
-        std::pair<double *, double *> bands =
-            DataFilter::get_avg_band_powers (data, eeg_channels, sampling_rate, true);
-
+        int eeg_num_channels = 0;
+        eeg_channels = BoardShim::get_eeg_channels (board_id, &eeg_num_channels);
+        auto start = high_resolution_clock::now ();
+        std::pair<double *, double *> bands = DataFilter::get_avg_band_powers (
+            data, data_count, eeg_channels, eeg_num_channels, sampling_rate, true);
+        auto stop = high_resolution_clock::now ();
+        auto duration = duration_cast<microseconds> (stop - start);
+        // set OMP_NUM_THREADS env variable to control calc time
+        std::cout << "Calc time : " << duration.count () << endl;
         for (int i = 0; i < 5; i++)
         {
             // for synthetic board all channels have different freqs, relative stddev should be huge
             std::cout << "avg: " << bands.first[i] << " stddev: " << bands.second[i] << std::endl;
         }
-
         delete[] bands.first;
         delete[] bands.second;
     }
@@ -59,12 +67,17 @@ int main (int argc, char *argv[])
     {
         BoardShim::log_message ((int)LogLevels::LEVEL_ERROR, err.what ());
         res = err.exit_code;
-        if (board->is_prepared ())
-        {
-            board->release_session ();
-        }
     }
 
+    if (data != NULL)
+    {
+        for (int i = 0; i < num_rows; i++)
+        {
+            delete[] data[i];
+        }
+    }
+    delete[] data;
+    delete[] eeg_channels;
     delete board;
 
     return res;

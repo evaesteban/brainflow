@@ -1,6 +1,5 @@
 #include <iostream>
 #include <stdlib.h>
-#include <string>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -13,24 +12,27 @@
 
 using namespace std;
 
-
 void print_one_row (double *data, int num_data_points);
-
 
 int main (int argc, char *argv[])
 {
+    struct BrainFlowInputParams params;
+    // use synthetic board for demo
+    int board_id = (int)BoardIds::SYNTHETIC_BOARD;
+
     BoardShim::enable_dev_board_logger ();
 
-    struct BrainFlowInputParams params;
+    BoardShim *board = new BoardShim (board_id, params);
+    double **data = NULL;
+    int *eeg_channels = NULL;
+    int num_rows = 0;
     int res = 0;
-    // use synthetic board for demo
-    BoardShim *board = new BoardShim ((int)BoardIds::SYNTHETIC_BOARD, params);
 
     try
     {
         board->prepare_session ();
         board->start_stream ();
-
+        BoardShim::log_message ((int)LogLevels::LEVEL_INFO, "Start sleeping in the main thread");
 #ifdef _WIN32
         Sleep (10000);
 #else
@@ -38,23 +40,28 @@ int main (int argc, char *argv[])
 #endif
 
         board->stop_stream ();
-        BrainFlowArray<double, 2> data = board->get_current_board_data (128);
+        int data_count = 0;
+        data = board->get_current_board_data (128, &data_count);
+        if (data_count != 128)
+        {
+            BoardShim::log_message ((int)LogLevels::LEVEL_ERROR,
+                "read %d packages, for this test we want exactly 128 packages", data_count);
+            return (int)BrainFlowExitCodes::GENERAL_ERROR;
+        }
         board->release_session ();
-        std::cout << "Original data:" << std::endl << data << std::endl;
+        num_rows = BoardShim::get_num_rows (board_id);
 
-        // apply filters
-        int sampling_rate = BoardShim::get_sampling_rate ((int)BoardIds::SYNTHETIC_BOARD);
-        std::vector<int> eeg_channels =
-            BoardShim::get_eeg_channels ((int)BoardIds::SYNTHETIC_BOARD);
-        int data_count = data.get_size (1);
-        for (int i = 0; i < eeg_channels.size (); i++)
+        int eeg_num_channels = 0;
+        eeg_channels = BoardShim::get_eeg_channels (board_id, &eeg_num_channels);
+        for (int i = 0; i < eeg_num_channels; i++)
         {
             // demo for wavelet transform
             // std::pair of coeffs array in format[A(J) D(J) D(J-1) ..... D(1)] where J is a
             // decomposition level, A - app coeffs, D - detailed coeffs, and array which stores
             // length for each block, len of this array is decomposition_length + 1
-            std::pair<double *, int *> wavelet_output = DataFilter::perform_wavelet_transform (
-                data.get_address (eeg_channels[i]), data_count, "db4", 4);
+            std::pair<double *, int *> wavelet_output =
+                DataFilter::perform_wavelet_transform (data[eeg_channels[i]], data_count, "db4", 4);
+
             // you can do smth with wavelet coeffs here, for example denoising works via thresholds
             // for wavelet coefficients
             std::cout << "approximation coefficients:" << std::endl;
@@ -75,7 +82,7 @@ int main (int argc, char *argv[])
                 wavelet_output, data_count, "db4", 4);
 
             std::cout << "Original data:" << std::endl;
-            print_one_row (data.get_address (eeg_channels[i]), data_count);
+            print_one_row (data[eeg_channels[i]], data_count);
             std::cout << "Restored after inverse wavelet transform data:" << std::endl;
             print_one_row (restored_data, data_count);
 
@@ -86,7 +93,7 @@ int main (int argc, char *argv[])
             // demo for fft
             // data count must be power of 2 for fft!
             std::complex<double> *fft_data = DataFilter::perform_fft (
-                data.get_address (eeg_channels[i]), data_count, (int)WindowFunctions::NO_WINDOW);
+                data[eeg_channels[i]], data_count, (int)WindowFunctions::NO_WINDOW);
             // len of fft_data array is N / 2 + 1
             std::cout << "FFT coeffs:" << std::endl;
             for (int i = 0; i < data_count / 2 + 1; i++)
@@ -106,12 +113,17 @@ int main (int argc, char *argv[])
     {
         BoardShim::log_message ((int)LogLevels::LEVEL_ERROR, err.what ());
         res = err.exit_code;
-        if (board->is_prepared ())
-        {
-            board->release_session ();
-        }
     }
 
+    if (data != NULL)
+    {
+        for (int i = 0; i < num_rows; i++)
+        {
+            delete[] data[i];
+        }
+    }
+    delete[] data;
+    delete[] eeg_channels;
     delete board;
 
     return res;
