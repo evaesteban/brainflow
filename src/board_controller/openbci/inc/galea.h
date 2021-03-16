@@ -4,6 +4,7 @@
 #include <math.h>
 #include <mutex>
 #include <thread>
+#include <utility>
 
 #include "board.h"
 #include "board_controller.h"
@@ -34,6 +35,7 @@ private:
     volatile double half_rtt;
     void read_thread ();
     int calc_time ();
+    std::pair<double, double> calc_linear_trend (DataBuffer &pc_time, DataBuffer &device_time);
 
 
 public:
@@ -47,6 +49,7 @@ public:
     int config_board (std::string config, std::string &response);
 
     static constexpr int package_size = 72;
+    static constexpr int timestamp_points = 1000; // todo find best value
     static constexpr int num_packages = 19;
     static constexpr int transaction_size = package_size * num_packages;
 };

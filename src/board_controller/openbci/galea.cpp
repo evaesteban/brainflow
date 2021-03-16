@@ -13,6 +13,7 @@
 constexpr int Galea::package_size;
 constexpr int Galea::num_packages;
 constexpr int Galea::transaction_size;
+constexpr int Galea::timestamp_points;
 
 
 Galea::Galea (struct BrainFlowInputParams params) : Board ((int)BoardIds::GALEA_BOARD, params)
@@ -298,8 +299,8 @@ void Galea::read_thread ()
 {
     int res;
     unsigned char b[Galea::transaction_size];
-    DataBuffer time_buffer (1, 11);
-    double latest_times[10];
+    DataBuffer pc_time_buffer (1, Galea::timestamp_points);
+    DataBuffer device_time_buffer (1, Galea::timestamp_points);
     constexpr int offset_last_package = Galea::package_size * (Galea::num_packages - 1);
     for (int i = 0; i < Galea::transaction_size; i++)
     {
@@ -321,15 +322,13 @@ void Galea::read_thread ()
         double timestamp_last_package = 0.0;
         memcpy (&timestamp_last_package, b + 64 + offset_last_package, 8);
         timestamp_last_package /= 1000; // from ms to seconds
-        double time_delta = pc_timestamp - timestamp_last_package;
-        time_buffer.add_data (&time_delta);
-        int num_time_deltas = (int)time_buffer.get_current_data (10, latest_times);
-        time_delta = 0.0;
-        for (int i = 0; i < num_time_deltas; i++)
-        {
-            time_delta += latest_times[i];
-        }
-        time_delta /= num_time_deltas;
+        pc_time_buffer.add_data (&pc_timestamp);
+        device_time_buffer.add_data (&timestamp_last_package);
+        std::pair<double, double> trend = calc_linear_trend (pc_time_buffer, device_time_buffer);
+        double coef = trend.first;
+        double shift = trend.second;
+        safe_logger (spdlog::level::trace, "coef is {}", coef);
+        safe_logger (spdlog::level::trace, "shift is {}", to_string(shift));
 
         if (res == -1)
         {
@@ -409,7 +408,7 @@ void Galea::read_thread ()
             timestamp_device /= 1000; // from ms to seconds
 
             package[board_descr["timestamp_channel"].get<int> ()] =
-                timestamp_device + time_delta - half_rtt;
+                timestamp_device * coef + shift - half_rtt;
             package[board_descr["other_channels"][0].get<int> ()] = pc_timestamp;
             package[board_descr["other_channels"][1].get<int> ()] = timestamp_device;
 
@@ -424,7 +423,7 @@ int Galea::calc_time ()
     constexpr int num_repeats = 5;
     constexpr int bytes_to_calc_rtt = 8;
 
-    std::vector<double> durations; // diff between unix time on pc and firmware time
+    std::vector<double> durations;
 
     int num_fails = 0;
     int max_num_fails = 1;
@@ -455,6 +454,7 @@ int Galea::calc_time ()
         }
         // calc half of round trip
         double duration = (done - start - firmware_delay) / 2;
+        safe_logger (spdlog::level::trace, "half rtt is {}", duration);
         durations.push_back (duration);
     }
     if (num_fails > max_num_fails)
@@ -468,4 +468,46 @@ int Galea::calc_time ()
         std::accumulate (durations.begin (), durations.end (), 0.0) / durations.size ();
     safe_logger (spdlog::level::trace, "average sending time is {}", half_rtt);
     return (int)BrainFlowExitCodes::STATUS_OK;
+}
+
+std::pair<double, double> Galea::calc_linear_trend (DataBuffer &pc_time, DataBuffer &device_time)
+{
+    // get latest datapoints from ringbuffers
+    double latest_pc_times[Galea::timestamp_points] = {0};
+    double latest_device_times[Galea::timestamp_points] = {0};
+    int num_points = (int)pc_time.get_current_data (Galea::timestamp_points, latest_pc_times);
+    device_time.get_current_data (Galea::timestamp_points, latest_device_times);
+
+    // edge case - single datapoint, can not calc linear trend
+    // maybe we can skip first package..
+    if (num_points == 1)
+    {
+        return std::make_pair (0.0, latest_pc_times[0]);
+    }
+
+    // calc mean, device - x axis, pc - y axis
+    double mean_y = 0;
+    double mean_x = 0;
+    for (int i = 0; i < num_points; i++)
+    {
+        mean_x += latest_device_times[i];
+        mean_y += latest_pc_times[i];
+    }
+    mean_x /= num_points;
+    mean_y /= num_points;
+
+    double temp_xy = 0.0;
+    double temp_xx = 0.0;
+    for (int i = 0; i < num_points; i++)
+    {
+        // should not overflow DBL_MAX
+        temp_xy += latest_device_times[i] * latest_pc_times[i];
+        temp_xx += latest_device_times[i] * latest_device_times[i];
+    }
+    double s_xy = temp_xy / num_points - mean_x * mean_y;
+    double s_xx = temp_xx / num_points - mean_x * mean_x;
+    double grad = s_xy / s_xx;
+    double y_int = mean_y - grad * mean_x;
+
+    return std::make_pair (grad, y_int);
 }
